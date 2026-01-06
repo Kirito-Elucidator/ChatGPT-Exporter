@@ -5,6 +5,7 @@
     const BASE_DELAY = 600;
     const JITTER = 400;
     const PAGE_LIMIT = 100;
+    const PROJECT_SIDEBAR_PREVIEW = 5;
     let accessToken = null;
     let capturedWorkspaceIds = new Set(); // 使用Set存储网络拦截到的ID，确保唯一性
 
@@ -237,7 +238,7 @@
     }
 
     async function exportConversations(options = {}) {
-        const { mode = 'personal', workspaceId = null, conversationEntries = null } = options;
+        const { mode = 'personal', workspaceId = null, conversationEntries = null, exportType = null } = options;
         const btn = getExportButton();
         btn.disabled = true;
 
@@ -294,13 +295,21 @@
             btn.textContent = '📦 生成 ZIP 文件…';
             const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
             const date = new Date().toISOString().slice(0, 10);
-            const filename = (Array.isArray(conversationEntries) && conversationEntries.length > 0)
-                ? (mode === 'team'
+            const selectionType = exportType || ((Array.isArray(conversationEntries) && conversationEntries.length > 0) ? 'selected' : 'full');
+            let filename = '';
+            if (selectionType === 'selected') {
+                filename = mode === 'team'
                     ? `chatgpt_team_selected_${workspaceId}_${date}.zip`
-                    : `chatgpt_personal_selected_${date}.zip`)
-                : (mode === 'team'
+                    : mode === 'project'
+                        ? `chatgpt_project_selected_${date}.zip`
+                        : `chatgpt_personal_selected_${date}.zip`;
+            } else {
+                filename = mode === 'team'
                     ? `chatgpt_team_backup_${workspaceId}_${date}.zip`
-                    : `chatgpt_personal_backup_${date}.zip`);
+                    : mode === 'project'
+                        ? `chatgpt_project_backup_${date}.zip`
+                        : `chatgpt_personal_backup_${date}.zip`;
+            }
             downloadFile(blob, filename);
             alert(`✅ 导出完成！`);
             btn.textContent = '✅ 完成';
@@ -321,6 +330,20 @@
         await exportConversations({ mode, workspaceId });
     }
 
+    async function startProjectSpaceExportProcess(workspaceId = null) {
+        try {
+            const projectEntries = await listProjectSpaceConversations(workspaceId);
+            if (projectEntries.length === 0) {
+                alert('未找到项目空间对话。');
+                return;
+            }
+            await exportConversations({ mode: 'project', workspaceId, conversationEntries: projectEntries, exportType: 'full' });
+        } catch (err) {
+            console.error('导出项目空间失败:', err);
+            alert(`导出项目空间失败: ${err.message}`);
+        }
+    }
+
     async function startSelectiveExportProcess(mode, workspaceId, conversationEntries) {
         await exportConversations({ mode, workspaceId, conversationEntries });
     }
@@ -329,7 +352,11 @@
         const { mode = 'personal', workspaceId = null, autoConfirm = false, source = 'schedule' } = options;
         const proceed = async () => {
             try {
-                await startExportProcess(mode, workspaceId);
+                if (mode === 'project') {
+                    await startProjectSpaceExportProcess(workspaceId);
+                } else {
+                    await startExportProcess(mode, workspaceId);
+                }
             } catch (err) {
                 console.error('[ChatGPT Exporter] 自动导出失败:', err);
             }
@@ -340,7 +367,7 @@
             return;
         }
 
-        const modeLabel = mode === 'team' ? '团队空间' : '个人空间';
+        const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
         if (confirm(`Chrome 扩展请求导出 ${modeLabel} 对话（来源: ${source}）。是否开始？`)) {
             proceed();
         }
@@ -369,6 +396,58 @@
             if (item?.gizmo?.id && item?.gizmo?.display?.name) {
                 projects.push({ id: item.gizmo.id, title: item.gizmo.display.name });
             }
+        });
+        return projects;
+    }
+
+    function resolveWorkspaceId(workspaceId) {
+        if (workspaceId) return workspaceId;
+        const match = document.cookie.match(/(?:^|; )_account=([^;]+)/);
+        if (match?.[1]) return match[1];
+        const detectedIds = detectAllWorkspaceIds();
+        return detectedIds.length > 0 ? detectedIds[0] : null;
+    }
+
+    async function getProjectSpaces(workspaceId, options = {}) {
+        const deviceId = getOaiDeviceId();
+        if (!deviceId) {
+            throw new Error('无法获取 oai-device-id，请确保已登录并刷新页面。');
+        }
+        const headers = {
+            'Authorization': `Bearer ${accessToken}`,
+            'oai-device-id': deviceId
+        };
+        const resolvedWorkspaceId = resolveWorkspaceId(workspaceId);
+        if (resolvedWorkspaceId) { headers['ChatGPT-Account-Id'] = resolvedWorkspaceId; }
+
+        const query = new URLSearchParams();
+        if (options.conversationsPerGizmo !== undefined) {
+            query.set('conversations_per_gizmo', String(options.conversationsPerGizmo));
+        }
+        if (options.ownedOnly !== undefined) {
+            query.set('owned_only', options.ownedOnly ? 'true' : 'false');
+        }
+        const url = query.toString()
+            ? `/backend-api/gizmos/snorlax/sidebar?${query.toString()}`
+            : '/backend-api/gizmos/snorlax/sidebar';
+
+        const r = await fetch(url, { headers });
+        if (!r.ok) {
+            throw new Error(`获取项目空间列表失败 (${r.status})`);
+        }
+        const data = await r.json();
+        const projects = [];
+        data.items?.forEach(item => {
+            const rawGizmo = item?.gizmo?.gizmo || item?.gizmo || item;
+            const display = rawGizmo?.display || item?.gizmo?.display || item?.display;
+            const id = rawGizmo?.id || item?.gizmo?.id || item?.id;
+            const title = display?.name || rawGizmo?.name || 'Untitled Project';
+            if (!id) return;
+            projects.push({
+                id,
+                title,
+                conversations: item?.conversations?.items || []
+            });
         });
         return projects;
     }
@@ -417,6 +496,40 @@
         return Array.from(all);
     }
 
+    function upsertConversationEntry(map, item, extra = {}) {
+        if (!item?.id) return;
+        const create_time = normalizeEpochSeconds(item.create_time || 0);
+        const update_time = normalizeEpochSeconds(item.update_time || item.create_time || 0);
+        const entry = {
+            id: item.id,
+            title: item.title || 'Untitled Conversation',
+            create_time,
+            update_time,
+            is_archived: item.is_archived ?? extra.is_archived ?? false,
+            projectId: extra.projectId || null,
+            projectTitle: extra.projectTitle || null
+        };
+        const existing = map.get(entry.id);
+        if (!existing) {
+            map.set(entry.id, entry);
+            return;
+        }
+        if (!existing.projectTitle && entry.projectTitle) {
+            existing.projectTitle = entry.projectTitle;
+            existing.projectId = entry.projectId;
+        }
+        if (!existing.create_time && entry.create_time) {
+            existing.create_time = entry.create_time;
+        }
+        existing.is_archived = existing.is_archived || entry.is_archived;
+        if ((entry.update_time || 0) > (existing.update_time || 0)) {
+            existing.update_time = entry.update_time;
+        }
+        if (existing.title === 'Untitled Conversation' && entry.title) {
+            existing.title = entry.title;
+        }
+    }
+
     async function listConversations(workspaceId) {
         if (!await ensureAccessToken()) {
             throw new Error('无法获取 Access Token，请刷新页面或打开任意一个对话后再试。');
@@ -434,39 +547,7 @@
         if (workspaceId) { headers['ChatGPT-Account-Id'] = workspaceId; }
 
         const map = new Map();
-        const addEntry = (item, extra = {}) => {
-            if (!item?.id) return;
-            const create_time = normalizeEpochSeconds(item.create_time || 0);
-            const update_time = normalizeEpochSeconds(item.update_time || item.create_time || 0);
-            const entry = {
-                id: item.id,
-                title: item.title || 'Untitled Conversation',
-                create_time,
-                update_time,
-                is_archived: item.is_archived ?? extra.is_archived ?? false,
-                projectId: extra.projectId || null,
-                projectTitle: extra.projectTitle || null
-            };
-            const existing = map.get(entry.id);
-            if (!existing) {
-                map.set(entry.id, entry);
-                return;
-            }
-            if (!existing.projectTitle && entry.projectTitle) {
-                existing.projectTitle = entry.projectTitle;
-                existing.projectId = entry.projectId;
-            }
-            if (!existing.create_time && entry.create_time) {
-                existing.create_time = entry.create_time;
-            }
-            existing.is_archived = existing.is_archived || entry.is_archived;
-            if ((entry.update_time || 0) > (existing.update_time || 0)) {
-                existing.update_time = entry.update_time;
-            }
-            if (existing.title === 'Untitled Conversation' && entry.title) {
-                existing.title = entry.title;
-            }
-        };
+        const addEntry = (item, extra = {}) => upsertConversationEntry(map, item, extra);
 
         for (const is_archived of [false, true]) {
             let offset = 0;
@@ -499,6 +580,58 @@
                     await sleep(jitter());
                 } while (cursor);
             }
+        }
+
+        return Array.from(map.values())
+            .sort((a, b) => (b.update_time || 0) - (a.update_time || 0));
+    }
+
+    async function listProjectSpaceConversations(workspaceId) {
+        if (!await ensureAccessToken()) {
+            throw new Error('无法获取 Access Token，请刷新页面或打开任意一个对话后再试。');
+        }
+
+        const deviceId = getOaiDeviceId();
+        if (!deviceId) {
+            throw new Error('无法获取 oai-device-id，请确保已登录并刷新页面。');
+        }
+
+        const headers = {
+            'Authorization': `Bearer ${accessToken}`,
+            'oai-device-id': deviceId
+        };
+        const resolvedWorkspaceId = resolveWorkspaceId(workspaceId);
+        if (resolvedWorkspaceId) { headers['ChatGPT-Account-Id'] = resolvedWorkspaceId; }
+
+        const map = new Map();
+        const projects = await getProjectSpaces(resolvedWorkspaceId, { conversationsPerGizmo: PROJECT_SIDEBAR_PREVIEW, ownedOnly: true });
+
+        for (const project of projects) {
+            let cursor = '0';
+            let fetched = false;
+            do {
+                const r = await fetch(`/backend-api/gizmos/${project.id}/conversations?cursor=${cursor}`, { headers });
+                if (!r.ok) {
+                    if (!fetched && Array.isArray(project.conversations) && project.conversations.length > 0) {
+                        console.warn(`项目空间对话列表请求失败 (${r.status})，使用侧边栏返回的预览对话。`);
+                        project.conversations.forEach(item => upsertConversationEntry(map, item, {
+                            projectId: project.id,
+                            projectTitle: project.title
+                        }));
+                        cursor = null;
+                        break;
+                    }
+                    throw new Error(`列举项目空间对话列表失败 (${r.status})`);
+                }
+                const j = await r.json();
+                j.items?.forEach(item => upsertConversationEntry(map, item, {
+                    projectId: project.id,
+                    projectTitle: project.title
+                }));
+                cursor = j.cursor;
+                fetched = true;
+                await sleep(jitter());
+            } while (cursor);
         }
 
         return Array.from(map.values())
@@ -592,7 +725,8 @@
             filtered: [],
             selected: new Set(),
             query: '',
-            scope: 'all',
+            scope: mode === 'project' ? 'project' : 'all',
+            scopeLocked: mode === 'project',
             archived: 'all',
             timeField: 'update',
             loading: true,
@@ -603,7 +737,7 @@
         };
 
         const renderBase = () => {
-            const modeLabel = mode === 'team' ? '团队空间' : '个人空间';
+            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
             const workspaceLabel = workspaceId ? `（${workspaceId}）` : '';
             dialog.innerHTML = `
                 <h2 style="margin-top:0; margin-bottom: 12px; font-size: 18px;">选择要导出的对话</h2>
@@ -611,19 +745,19 @@
                 <div style="display: flex; gap: 8px; margin-bottom: 8px;">
                     <input id="conv-search" type="text" placeholder="搜索标题/项目名/ID"
                         style="flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #ccc; box-sizing: border-box;">
-                    <select id="filter-scope" style="padding: 8px; border-radius: 6px; border: 1px solid #ccc;">
+                    <select id="filter-scope" style="padding: 8px 28px 8px 8px; border-radius: 6px; border: 1px solid #ccc;">
                         <option value="all">全部范围</option>
                         <option value="project">仅项目</option>
                         <option value="root">仅项目外</option>
                     </select>
-                    <select id="filter-archived" style="padding: 8px; border-radius: 6px; border: 1px solid #ccc;">
+                    <select id="filter-archived" style="padding: 8px 28px 8px 8px; border-radius: 6px; border: 1px solid #ccc;">
                         <option value="all">全部状态</option>
                         <option value="active">仅未归档</option>
                         <option value="archived">仅已归档</option>
                     </select>
                 </div>
                 <div style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
-                    <select id="filter-time-field" style="padding: 8px; border-radius: 6px; border: 1px solid #ccc;">
+                    <select id="filter-time-field" style="padding: 8px 28px 8px 8px; border-radius: 6px; border: 1px solid #ccc;">
                         <option value="update">按更新时间</option>
                         <option value="create">按创建时间</option>
                     </select>
@@ -657,6 +791,14 @@
             const clearAllBtn = dialog.querySelector('#clear-all-btn');
             const backBtn = dialog.querySelector('#back-btn');
             const exportBtn = dialog.querySelector('#export-selected-btn');
+
+            if (state.scopeLocked && scopeSelect) {
+                scopeSelect.value = 'project';
+                scopeSelect.disabled = true;
+                scopeSelect.style.opacity = '0.7';
+                scopeSelect.style.cursor = 'not-allowed';
+                scopeSelect.title = '项目空间仅包含项目对话';
+            }
 
             searchInput.oninput = (e) => {
                 state.query = e.target.value || '';
@@ -864,7 +1006,10 @@
         document.body.appendChild(overlay);
         overlay.onclick = (e) => { if (e.target === overlay) closeDialog(); };
 
-        listConversations(workspaceId)
+        const listPromise = mode === 'project'
+            ? listProjectSpaceConversations(workspaceId)
+            : listConversations(workspaceId);
+        listPromise
             .then(list => {
                 state.list = list;
                 state.loading = false;
@@ -971,6 +1116,14 @@
                                         </div>
                                     </div>
                                     <div style="padding: 16px; border: 1px solid #ccc; border-radius: 8px; background: #f9fafb;">
+                                        <strong style="font-size: 16px;">项目空间</strong>
+                                        <p style="margin: 4px 0 12px 0; color: #666;">导出项目空间下的对话，将按项目自动分组。</p>
+                                        <div style="display: flex; gap: 8px;">
+                                            <button id="select-project-btn" style="padding: 8px 12px; border: none; border-radius: 6px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;">导出全部</button>
+                                            <button id="select-project-picker-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">选择对话导出</button>
+                                        </div>
+                                    </div>
+                                    <div style="padding: 16px; border: 1px solid #ccc; border-radius: 8px; background: #f9fafb;">
                                         <strong style="font-size: 16px;">团队空间</strong>
                                         <p style="margin: 4px 0 12px 0; color: #666;">导出团队空间下的对话，将自动检测ID。</p>
                                         <div style="display: flex; gap: 8px;">
@@ -997,6 +1150,14 @@
                 document.getElementById('select-personal-picker-btn').onclick = () => {
                     closeDialog();
                     showConversationPicker({ mode: 'personal', workspaceId: null });
+                };
+                document.getElementById('select-project-btn').onclick = () => {
+                    closeDialog();
+                    startProjectSpaceExportProcess();
+                };
+                document.getElementById('select-project-picker-btn').onclick = () => {
+                    closeDialog();
+                    showConversationPicker({ mode: 'project', workspaceId: null });
                 };
                 const startTeamFlow = (action) => {
                     const detectedIds = detectAllWorkspaceIds();
@@ -1064,7 +1225,12 @@
     window.ChatGPTExporter = window.ChatGPTExporter || {};
     Object.assign(window.ChatGPTExporter, {
         showDialog: showExportDialog,
-        startManualExport: (mode = 'personal', workspaceId = null) => startExportProcess(mode, workspaceId),
+        startManualExport: (mode = 'personal', workspaceId = null) => {
+            if (mode === 'project') {
+                return startProjectSpaceExportProcess(workspaceId);
+            }
+            return startExportProcess(mode, workspaceId);
+        },
         startScheduledExport
     });
 
