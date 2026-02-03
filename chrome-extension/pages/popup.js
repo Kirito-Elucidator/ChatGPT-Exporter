@@ -34,27 +34,29 @@ async function openDialog() {
         chrome.tabs.create({ url: 'https://chatgpt.com/' });
         return;
     }
+    const isNoReceiverError = (err) => {
+        const message = err?.message || String(err || '');
+        return message.includes('Receiving end does not exist') || message.includes('Could not establish connection');
+    };
     try {
         await tabs.sendMessage(tab.id, { type: 'OPEN_EXPORT_DIALOG' });
+        return;
     } catch (error) {
-        console.warn('Initial connection failed, attempting to inject scripts...', error.message || error);
-        try {
-            // Programmatically inject the content scripts
-            await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                files: ['content/inject-exporter.js', 'content/auto-export.js']
-            });
-            
-            // Wait a moment for the scripts to initialize
-            await new Promise(resolve => setTimeout(resolve, 200));
-            
-            // Retry sending the message
-            await tabs.sendMessage(tab.id, { type: 'OPEN_EXPORT_DIALOG' });
-            
-        } catch (retryError) {
-            alert('无法连接到页面脚本。请尝试刷新 ChatGPT 页面后再试。');
-            console.error('Retry failed:', retryError);
+        if (!isNoReceiverError(error)) {
+            console.warn('Failed to reach content scripts, retrying after injection...', error);
         }
+    }
+
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content/inject-exporter.js', 'content/auto-export.js']
+        });
+        await new Promise(resolve => setTimeout(resolve, 200));
+        await tabs.sendMessage(tab.id, { type: 'OPEN_EXPORT_DIALOG' });
+    } catch (retryError) {
+        alert('无法连接到页面脚本。请尝试刷新 ChatGPT 页面后再试。');
+        console.error('Retry failed:', retryError);
     }
 }
 

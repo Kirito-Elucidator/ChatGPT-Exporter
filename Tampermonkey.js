@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         ChatGPT Universal Exporter (Markdown Support)
-// @version      1.3.0
+// @version      1.3.1
 // @description  User-centric ZIP exporter for personal/team/project spaces. Supports JSON & Markdown formats. Based on ChatGPT Universal Exporter.
 // @author       huhu
 // @match        https://chatgpt.com/*
@@ -162,6 +162,89 @@
             .trim();
     }
 
+    function processContentReferences(text, contentReferences) {
+        if (!text || !Array.isArray(contentReferences) || contentReferences.length === 0) {
+            return { text, footnotes: [] };
+        }
+
+        const references = contentReferences.filter(ref => ref && typeof ref.matched_text === 'string' && ref.matched_text.length > 0);
+        if (references.length === 0) {
+            return { text, footnotes: [] };
+        }
+
+        const getReferenceInfo = (ref) => {
+            const item = Array.isArray(ref.items) ? ref.items[0] : null;
+            const url = item?.url || (Array.isArray(ref.safe_urls) ? ref.safe_urls[0] : '') || '';
+            const title = item?.title || '';
+            let label = item?.attribution || '';
+            if (!label && typeof ref.alt === 'string') {
+                const match = ref.alt.match(/\[([^\]]+)\]\([^)]+\)/);
+                if (match) label = match[1];
+            }
+            if (!label) label = title || url;
+            return { url, title, label };
+        };
+
+        const footnotes = [];
+        const footnoteIndexByKey = new Map();
+        const citationRefs = references
+            .filter(ref => ref.type === 'grouped_webpages')
+            .sort((a, b) => {
+                const aIdx = Number.isFinite(a.start_idx) ? a.start_idx : Number.MAX_SAFE_INTEGER;
+                const bIdx = Number.isFinite(b.start_idx) ? b.start_idx : Number.MAX_SAFE_INTEGER;
+                return aIdx - bIdx;
+            });
+
+        citationRefs.forEach(ref => {
+            const info = getReferenceInfo(ref);
+            if (!info.url) return;
+            const key = `${info.url}|${info.title}`;
+            if (footnoteIndexByKey.has(key)) return;
+            const index = footnotes.length + 1;
+            footnoteIndexByKey.set(key, index);
+            footnotes.push({ index, url: info.url, title: info.title, label: info.label });
+        });
+
+        const sortedByReplacement = references
+            .slice()
+            .sort((a, b) => {
+                const aIdx = Number.isFinite(a.start_idx) ? a.start_idx : -1;
+                const bIdx = Number.isFinite(b.start_idx) ? b.start_idx : -1;
+                if (aIdx !== -1 || bIdx !== -1) {
+                    return bIdx - aIdx;
+                }
+                return (b.matched_text?.length || 0) - (a.matched_text?.length || 0);
+            });
+
+        let output = text;
+        sortedByReplacement.forEach(ref => {
+            if (!ref?.matched_text || ref.type === 'sources_footnote') return;
+            let replacement = '';
+            if (ref.type === 'grouped_webpages') {
+                const info = getReferenceInfo(ref);
+                if (info.url) {
+                    const key = `${info.url}|${info.title}`;
+                    const index = footnoteIndexByKey.get(key);
+                    replacement = index ? `([${info.label}][${index}])` : (ref.alt || '');
+                } else {
+                    replacement = ref.alt || '';
+                }
+            } else {
+                replacement = ref.alt || '';
+            }
+
+            if (Number.isFinite(ref.start_idx) && Number.isFinite(ref.end_idx)) {
+                if (output.slice(ref.start_idx, ref.end_idx) === ref.matched_text) {
+                    output = output.slice(0, ref.start_idx) + replacement + output.slice(ref.end_idx);
+                    return;
+                }
+            }
+            output = output.split(ref.matched_text).join(replacement);
+        });
+
+        return { text: output, footnotes };
+    }
+
     function extractConversationMessages(convData) {
         const mapping = convData?.mapping;
         if (!mapping) return [];
@@ -191,12 +274,21 @@
                             .map(part => typeof part === 'string' ? part : (part?.text ?? ''))
                             .filter(Boolean)
                             .join('\n');
-                        const cleaned = cleanMessageContent(rawText);
+                        const contentReferences = msg.metadata?.content_references || [];
+                        let processedText = rawText;
+                        let footnotes = [];
+                        if (Array.isArray(contentReferences) && contentReferences.length > 0) {
+                            const processed = processContentReferences(rawText, contentReferences);
+                            processedText = processed.text;
+                            footnotes = processed.footnotes;
+                        }
+                        const cleaned = cleanMessageContent(processedText);
                         if (cleaned) {
                             messages.push({
                                 role: author,
                                 content: cleaned,
-                                create_time: msg.create_time || null
+                                create_time: msg.create_time || null,
+                                footnotes
                             });
                         }
                     }
@@ -228,6 +320,17 @@
             const roleLabel = msg.role === 'user' ? '# User' : '# Assistant';
             mdLines.push(roleLabel);
             mdLines.push(msg.content);
+            if (Array.isArray(msg.footnotes) && msg.footnotes.length > 0) {
+                mdLines.push('');
+                msg.footnotes
+                    .slice()
+                    .sort((a, b) => a.index - b.index)
+                    .forEach(note => {
+                        if (!note.url) return;
+                        const title = note.title ? ` "${note.title}"` : '';
+                        mdLines.push(`[${note.index}]: ${note.url}${title}`);
+                    });
+            }
             mdLines.push('');
         });
 
