@@ -16,9 +16,31 @@ jobs:
       - name: Package chrome extension
         run: |
           zip -r ChatGPT-Exporter.zip chrome-extension
-      - name: Publish release
+      - name: Resolve release notes
+        id: release_notes
+        run: |
+          NOTES_PATH=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES_PATH" ]; then
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+            echo "notes_path=$NOTES_PATH" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish release (with custom notes)
+        if: steps.release_notes.outputs.has_notes == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            ChatGPT-Exporter.zip
+            Tampermonkey.js
+          body_path: ${{ steps.release_notes.outputs.notes_path }}
+          generate_release_notes: true
+      - name: Publish release (auto notes)
+        if: steps.release_notes.outputs.has_notes != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
           files: |
             ChatGPT-Exporter.zip
             Tampermonkey.js
