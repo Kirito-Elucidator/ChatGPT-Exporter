@@ -879,6 +879,7 @@
                     </div>
                     <div style="display: flex; gap: 8px;">
                         <button id="back-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">返回</button>
+                        <button id="export-qa-btn" style="padding: 8px 12px; border: 1px solid #10a37f; border-radius: 6px; background: #fff; color: #10a37f; cursor: pointer; font-weight: bold;" disabled>选择Q&A导出（需选 1 条）</button>
                         <button id="export-selected-btn" style="padding: 8px 12px; border: none; border-radius: 6px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;" disabled>导出选中 (0)</button>
                     </div>
                 </div>
@@ -895,6 +896,7 @@
             const clearAllBtn = dialog.querySelector('#clear-all-btn');
             const backBtn = dialog.querySelector('#back-btn');
             const exportBtn = dialog.querySelector('#export-selected-btn');
+            const qaBtn = dialog.querySelector('#export-qa-btn');
 
             if (state.scopeLocked && scopeSelect) {
                 scopeSelect.value = 'project';
@@ -954,6 +956,16 @@
                 closeDialog();
                 showExportDialog();
             };
+            if (qaBtn) {
+                qaBtn.onclick = () => {
+                    if (state.selected.size !== 1) return;
+                    const selectedId = Array.from(state.selected)[0];
+                    const conversationEntry = state.list.find(item => item.id === selectedId);
+                    if (!conversationEntry) return;
+                    closeDialog();
+                    showTurnPicker({ mode, workspaceId, conversationEntry });
+                };
+            }
             exportBtn.onclick = async () => {
                 if (state.selected.size === 0) return;
                 const selectedList = state.list.filter(item => state.selected.has(item.id));
@@ -991,6 +1003,7 @@
             const statusEl = dialog.querySelector('#conv-status');
             const listEl = dialog.querySelector('#conv-list');
             const exportBtn = dialog.querySelector('#export-selected-btn');
+            const qaBtn = dialog.querySelector('#export-qa-btn');
             const selectAllBtn = dialog.querySelector('#select-all-btn');
             const clearAllBtn = dialog.querySelector('#clear-all-btn');
             const controlsDisabled = state.loading;
@@ -998,6 +1011,7 @@
             if (selectAllBtn) selectAllBtn.disabled = controlsDisabled;
             if (clearAllBtn) clearAllBtn.disabled = controlsDisabled;
             if (exportBtn) exportBtn.disabled = controlsDisabled || state.selected.size === 0;
+            if (qaBtn) qaBtn.disabled = controlsDisabled || state.selected.size !== 1;
 
             listEl.innerHTML = '';
             if (state.loading) {
@@ -1008,6 +1022,7 @@
             const visibleCount = Math.min(state.visibleCount, state.filtered.length);
             statusEl.textContent = `共 ${state.list.length} 条，当前筛选 ${state.filtered.length} 条，显示 ${visibleCount} 条，已选 ${state.selected.size} 条`;
             exportBtn.textContent = `导出选中 (${state.selected.size})`;
+            if (qaBtn) qaBtn.textContent = state.selected.size === 1 ? '选择Q&A导出' : '选择Q&A导出（需选 1 条）';
 
             if (state.filtered.length === 0) {
                 const empty = document.createElement('div');
@@ -1128,6 +1143,503 @@
                 statusEl.textContent = `加载失败: ${err.message}`;
                 renderList();
             });
+    }
+
+
+    // --- [新增] Q&A 细粒度导出（按轮次选择） ---
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function extractTextFromMessage(msg) {
+        const content = msg?.content;
+        if (!content) return '';
+
+        // Prefer parts[] when available (works for text/multimodal_text/etc.).
+        if (Array.isArray(content.parts)) {
+            const rawText = content.parts
+                .map(part => typeof part === 'string' ? part : (part?.text ?? ''))
+                .filter(Boolean)
+                .join('\n');
+            return rawText || '';
+        }
+
+        // Some payloads store text directly.
+        if (typeof content.text === 'string') return content.text;
+        return '';
+    }
+
+    function getConversationRootId(mapping) {
+        if (!mapping) return null;
+        const keys = Object.keys(mapping);
+        if (mapping['client-created-root']) return 'client-created-root';
+        return keys.find(id => !mapping[id]?.parent) || keys[0] || null;
+    }
+
+    function getMainPathNodeIds(convData) {
+        const mapping = convData?.mapping;
+        if (!mapping) return [];
+        const rootId = getConversationRootId(mapping);
+        let nodeId = convData?.current_node || rootId;
+        const path = [];
+        const visited = new Set();
+        while (nodeId && mapping[nodeId] && !visited.has(nodeId)) {
+            visited.add(nodeId);
+            path.push(nodeId);
+            nodeId = mapping[nodeId].parent;
+        }
+        path.reverse();
+        // Ensure root is included when current_node is missing/invalid
+        if (path.length === 0 && rootId) return [rootId];
+        return path;
+    }
+
+    function extractProcessedMessageForQA(msg) {
+        if (!msg) return null;
+        const author = msg.author?.role;
+        if (!author || author === 'system') return null;
+
+        const isHidden = msg.metadata?.is_visually_hidden_from_conversation ||
+            msg.metadata?.is_contextual_answers_system_message;
+        if (isHidden) return null;
+
+        const rawText = extractTextFromMessage(msg);
+        if (!rawText) return null;
+
+        const contentReferences = msg.metadata?.content_references || [];
+        let processedText = rawText;
+        let footnotes = [];
+        if (Array.isArray(contentReferences) && contentReferences.length > 0) {
+            const processed = processContentReferences(rawText, contentReferences);
+            processedText = processed.text;
+            footnotes = processed.footnotes;
+        }
+        const cleaned = cleanMessageContent(processedText);
+        if (!cleaned) return null;
+
+        return {
+            role: author,
+            content: cleaned,
+            create_time: msg.create_time || null,
+            footnotes
+        };
+    }
+
+    function extractVisibleMessagesLinearForQA(convData) {
+        const mapping = convData?.mapping;
+        if (!mapping) return [];
+
+        const nodeIds = getMainPathNodeIds(convData);
+        const messages = [];
+        nodeIds.forEach(nodeId => {
+            const node = mapping[nodeId];
+            const msg = node?.message;
+            const processed = extractProcessedMessageForQA(msg);
+            if (processed) messages.push(processed);
+        });
+        return messages;
+    }
+
+    function buildTurnsFromConversation(convData) {
+        const msgs = extractVisibleMessagesLinearForQA(convData);
+        const turns = [];
+        for (const m of msgs) {
+            if (m.role === 'user') {
+                turns.push({
+                    user: m,
+                    assistants: []
+                });
+                continue;
+            }
+            if (m.role === 'assistant') {
+                if (turns.length === 0) {
+                    turns.push({ user: null, assistants: [m] });
+                } else {
+                    turns[turns.length - 1].assistants.push(m);
+                }
+            }
+        }
+        // Keep only turns that have at least one side visible
+        return turns.filter(t => (t.user && t.user.content) || (t.assistants && t.assistants.length > 0));
+    }
+
+    function convertSelectedTurnsToMarkdown(conversationEntry, convData, selectedTurns, selectedIndexes) {
+        const title = conversationEntry?.title || convData?.title || 'Untitled Conversation';
+        const md = [];
+        md.push(`# ${title}`);
+        md.push('');
+        selectedTurns.forEach((turn, i) => {
+            const originalIdx = selectedIndexes[i];
+            md.push(`## 第 ${originalIdx + 1} 轮`);
+            md.push('');
+            md.push('### Q');
+            const qText = turn.user?.content || '(无提问)';
+            md.push(qText);
+            if (turn.user?.create_time) {
+                md.push('');
+                md.push(`> User 时间: ${formatTimestamp(turn.user.create_time) || '未知'}`);
+            }
+            if (Array.isArray(turn.user?.footnotes) && turn.user.footnotes.length > 0) {
+                md.push('');
+                turn.user.footnotes
+                    .slice()
+                    .sort((a, b) => a.index - b.index)
+                    .forEach(note => {
+                        if (!note.url) return;
+                        const t = note.title ? ` "${note.title}"` : '';
+                        md.push(`[${note.index}]: ${note.url}${t}`);
+                    });
+            }
+            md.push('');
+            md.push('### A');
+            if (!turn.assistants || turn.assistants.length === 0) {
+                md.push('(无回答)');
+            } else {
+                turn.assistants.forEach((aMsg, ai) => {
+                    if (ai > 0) md.push('\n---\n');
+                    md.push(aMsg.content);
+                    if (aMsg.create_time) {
+                        md.push('');
+                        md.push(`> Assistant 时间: ${formatTimestamp(aMsg.create_time) || '未知'}`);
+                    }
+                    if (Array.isArray(aMsg.footnotes) && aMsg.footnotes.length > 0) {
+                        md.push('');
+                        aMsg.footnotes
+                            .slice()
+                            .sort((x, y) => x.index - y.index)
+                            .forEach(note => {
+                                if (!note.url) return;
+                                const t = note.title ? ` "${note.title}"` : '';
+                                md.push(`[${note.index}]: ${note.url}${t}`);
+                            });
+                    }
+                });
+            }
+            md.push('');
+        });
+        return md.join('\n').trim() + '\n';
+    }
+
+    async function exportConversationSelectedTurns(options = {}) {
+        const { mode = 'personal', workspaceId = null, conversationEntry, selectedTurnIndexes = [] } = options;
+        if (!conversationEntry?.id) throw new Error('缺少 conversationEntry.id');
+        if (!Array.isArray(selectedTurnIndexes) || selectedTurnIndexes.length === 0) return;
+
+        if (!await ensureAccessToken()) {
+            throw new Error('无法获取 Access Token');
+        }
+
+        const convData = await getConversation(conversationEntry.id, workspaceId);
+        const turns = buildTurnsFromConversation(convData);
+        const sortedIdx = Array.from(new Set(selectedTurnIndexes))
+            .filter(i => Number.isInteger(i) && i >= 0 && i < turns.length)
+            .sort((a, b) => a - b);
+
+        if (sortedIdx.length === 0) {
+            throw new Error('未选中任何有效轮次');
+        }
+
+        const selectedTurns = sortedIdx.map(i => turns[i]);
+        const qaJson = {
+            conversation_id: convData.conversation_id || conversationEntry.id,
+            title: conversationEntry.title || convData.title || 'Untitled Conversation',
+            mode,
+            workspace_id: workspaceId || null,
+            selected_turn_indexes: sortedIdx,
+            turns: selectedTurns.map((t, idx) => ({
+                turn_index: sortedIdx[idx],
+                user: t.user ? {
+                    content: t.user.content,
+                    create_time: t.user.create_time || null,
+                    footnotes: t.user.footnotes || []
+                } : null,
+                assistants: (t.assistants || []).map(a => ({
+                    content: a.content,
+                    create_time: a.create_time || null,
+                    footnotes: a.footnotes || []
+                }))
+            })),
+            __fetched_at: convData.__fetched_at || new Date().toISOString()
+        };
+
+        const md = convertSelectedTurnsToMarkdown(conversationEntry, convData, selectedTurns, sortedIdx);
+
+        const zip = new JSZip();
+        const titleSafe = sanitizeFilename(qaJson.title).slice(0, 60) || 'Untitled_Conversation';
+        const convId = qaJson.conversation_id || conversationEntry.id;
+        const shortId = convId.includes('-') ? convId.split('-').pop() : convId;
+        const baseName = `${titleSafe}_${shortId}_qa_selected`;
+
+        const target = conversationEntry?.projectTitle
+            ? zip.folder(sanitizeFilename(conversationEntry.projectTitle))
+            : zip;
+
+        target.file(`${baseName}.json`, JSON.stringify(qaJson, null, 2));
+        target.file(`${baseName}.md`, md);
+
+        const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+        const date = new Date().toISOString().slice(0, 10);
+        const wsPart = mode === 'team' ? `_${workspaceId || 'unknown'}` : '';
+        const filename = `chatgpt_${mode}${wsPart}_qa_${shortId}_${date}.zip`;
+        downloadFile(blob, filename);
+
+        alert('✅ Q&A 选择导出完成！');
+    }
+
+    function showTurnPicker(options = {}) {
+        const { mode = 'personal', workspaceId = null, conversationEntry } = options;
+        const existing = document.getElementById('qa-dialog-overlay');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'qa-dialog-overlay';
+        Object.assign(overlay.style, {
+            position: 'fixed', top: '0', left: '0', width: '100%', height: '100%',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)', zIndex: '99998',
+            display: 'flex', alignItems: 'center', justifyContent: 'center'
+        });
+
+        const dialog = document.createElement('div');
+        dialog.id = 'qa-dialog';
+        Object.assign(dialog.style, {
+            background: '#fff', padding: '24px', borderRadius: '12px',
+            boxShadow: '0 5px 15px rgba(0,0,0,.3)', width: '720px',
+            fontFamily: 'sans-serif', color: '#333', boxSizing: 'border-box'
+        });
+
+        const safeRemoveOverlay = () => {
+            try {
+                if (overlay?.parentNode) overlay.parentNode.removeChild(overlay);
+            } catch (_) {}
+        };
+
+        const state = {
+            turns: [],
+            filtered: [],
+            selected: new Set(),
+            query: '',
+            loading: true,
+            pageSize: 100,
+            visibleCount: 100
+        };
+
+        const renderBase = () => {
+            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
+            const workspaceLabel = workspaceId ? `（${escapeHtml(workspaceId)}）` : '';
+            const title = conversationEntry?.title || 'Untitled Conversation';
+
+            dialog.innerHTML = `
+                <h2 style="margin-top:0; margin-bottom: 12px; font-size: 18px;">选择要导出的 Q&A</h2>
+                <div style="margin-bottom: 8px; color: #666; font-size: 12px;">空间：${modeLabel}${workspaceLabel}</div>
+                <div style="margin-bottom: 12px; color: #111; font-size: 13px; font-weight: bold;">对话：${escapeHtml(title)}</div>
+
+                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                    <input id="turn-search" type="text" placeholder="搜索本对话内容"
+                        style="flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #ccc; box-sizing: border-box;">
+                </div>
+
+                <div id="turn-status" style="margin-bottom: 8px; font-size: 12px; color: #666;">正在加载对话...</div>
+                <div id="turn-list" style="max-height: 360px; overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px; background: #fff;"></div>
+
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px;">
+                    <div style="display: flex; gap: 8px;">
+                        <button id="turn-select-all-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">全选</button>
+                        <button id="turn-clear-all-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">清空</button>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button id="turn-back-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">返回</button>
+                        <button id="turn-export-btn" style="padding: 8px 12px; border: none; border-radius: 6px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;" disabled>导出选中 (0)</button>
+                    </div>
+                </div>
+            `;
+
+            const searchInput = dialog.querySelector('#turn-search');
+            const selectAllBtn = dialog.querySelector('#turn-select-all-btn');
+            const clearAllBtn = dialog.querySelector('#turn-clear-all-btn');
+            const backBtn = dialog.querySelector('#turn-back-btn');
+            const exportBtn = dialog.querySelector('#turn-export-btn');
+
+            searchInput.oninput = (e) => {
+                state.query = e.target.value || '';
+                applyFilters();
+                renderList();
+            };
+            selectAllBtn.onclick = () => {
+                state.filtered.forEach(item => state.selected.add(item.index));
+                renderList();
+            };
+            clearAllBtn.onclick = () => {
+                state.selected.clear();
+                renderList();
+            };
+            backBtn.onclick = () => {
+                safeRemoveOverlay();
+                showConversationPicker({ mode, workspaceId });
+            };
+            exportBtn.onclick = async () => {
+                if (state.selected.size === 0) return;
+                const idx = Array.from(state.selected).slice().sort((a, b) => a - b);
+
+                exportBtn.disabled = true;
+                exportBtn.textContent = '导出中...';
+                safeRemoveOverlay();
+
+                try {
+                    await exportConversationSelectedTurns({
+                        mode,
+                        workspaceId,
+                        conversationEntry,
+                        selectedTurnIndexes: idx
+                    });
+                } catch (err) {
+                    console.error('[ChatGPT Exporter][QA] 导出失败:', err);
+                    alert(`导出失败：${err?.message || err}`);
+                }
+            };
+        };
+
+        const applyFilters = () => {
+            const q = state.query.trim().toLowerCase();
+            const indexed = state.turns.map((turn, index) => ({ turn, index }));
+            if (!q) {
+                state.filtered = indexed;
+            } else {
+                state.filtered = indexed.filter(({ turn }) => {
+                    const qText = (turn.user?.content || '').toLowerCase();
+                    const aText = (turn.assistants || []).map(a => a.content || '').join('\n').toLowerCase();
+                    return qText.includes(q) || aText.includes(q);
+                });
+            }
+            state.visibleCount = state.pageSize;
+        };
+
+        const renderList = () => {
+            const statusEl = dialog.querySelector('#turn-status');
+            const listEl = dialog.querySelector('#turn-list');
+            const exportBtn = dialog.querySelector('#turn-export-btn');
+            const selectAllBtn = dialog.querySelector('#turn-select-all-btn');
+            const clearAllBtn = dialog.querySelector('#turn-clear-all-btn');
+
+            const controlsDisabled = state.loading;
+            if (selectAllBtn) selectAllBtn.disabled = controlsDisabled;
+            if (clearAllBtn) clearAllBtn.disabled = controlsDisabled;
+            if (exportBtn) exportBtn.disabled = controlsDisabled || state.selected.size === 0;
+
+            listEl.innerHTML = '';
+            if (state.loading) {
+                statusEl.textContent = '正在加载对话...';
+                return;
+            }
+
+            const visibleCount = Math.min(state.visibleCount, state.filtered.length);
+            statusEl.textContent = `共 ${state.turns.length} 轮，当前筛选 ${state.filtered.length} 轮，显示 ${visibleCount} 轮，已选 ${state.selected.size} 轮`;
+            exportBtn.textContent = `导出选中 (${state.selected.size})`;
+
+            if (state.filtered.length === 0) {
+                const empty = document.createElement('div');
+                empty.textContent = '没有匹配的轮次。';
+                empty.style.color = '#999';
+                empty.style.padding = '8px 4px';
+                listEl.appendChild(empty);
+                return;
+            }
+
+            const visibleItems = state.filtered.slice(0, state.visibleCount);
+            visibleItems.forEach(({ turn, index }) => {
+                const label = document.createElement('label');
+                Object.assign(label.style, {
+                    display: 'flex', gap: '8px', padding: '8px',
+                    border: '1px solid #e5e7eb', borderRadius: '6px',
+                    marginBottom: '8px', cursor: 'pointer', alignItems: 'flex-start'
+                });
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = state.selected.has(index);
+                checkbox.onchange = (e) => {
+                    if (e.target.checked) state.selected.add(index);
+                    else state.selected.delete(index);
+                    renderList();
+                };
+
+                const content = document.createElement('div');
+                content.style.flex = '1';
+
+                const title = document.createElement('div');
+                title.textContent = `第 ${index + 1} 轮`;
+                title.style.fontWeight = 'bold';
+                title.style.fontSize = '14px';
+
+                const meta = document.createElement('div');
+                meta.style.fontSize = '12px';
+                meta.style.color = '#666';
+                const userTime = turn.user?.create_time ? (formatTimestamp(turn.user.create_time) || '未知') : '未知';
+                const aCount = (turn.assistants || []).length;
+                meta.textContent = `User 时间: ${userTime} | Assistant 条数: ${aCount}`;
+
+                const preview = document.createElement('div');
+                preview.style.marginTop = '6px';
+                preview.style.fontSize = '12px';
+                preview.style.color = '#333';
+                const qText = (turn.user?.content || '(无提问)').replace(/\s+/g, ' ').slice(0, 140);
+                const aText = (turn.assistants || []).map(a => a.content || '').join(' ').replace(/\s+/g, ' ').slice(0, 140);
+                preview.textContent = `Q: ${qText}${qText.length >= 140 ? '…' : ''}\nA: ${aText}${aText.length >= 140 ? '…' : ''}`;
+
+                content.appendChild(title);
+                content.appendChild(meta);
+                content.appendChild(preview);
+
+                label.appendChild(checkbox);
+                label.appendChild(content);
+                listEl.appendChild(label);
+            });
+
+            if (state.filtered.length > state.visibleCount) {
+                const loadMore = document.createElement('button');
+                loadMore.textContent = `加载更多（剩余 ${state.filtered.length - state.visibleCount} 轮）`;
+                Object.assign(loadMore.style, {
+                    width: '100%', padding: '8px 12px', border: '1px solid #ccc',
+                    borderRadius: '6px', background: '#fff', cursor: 'pointer'
+                });
+                loadMore.onclick = () => {
+                    state.visibleCount = Math.min(state.visibleCount + state.pageSize, state.filtered.length);
+                    renderList();
+                };
+                listEl.appendChild(loadMore);
+            }
+        };
+
+        renderBase();
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+        overlay.onclick = (e) => { if (e.target === overlay) safeRemoveOverlay(); };
+
+        (async () => {
+            try {
+                if (!await ensureAccessToken()) {
+                    throw new Error('无法获取 Access Token');
+                }
+                const convData = await getConversation(conversationEntry.id, workspaceId);
+                state.turns = buildTurnsFromConversation(convData);
+                state.loading = false;
+                applyFilters();
+                renderList();
+            } catch (err) {
+                console.error('[ChatGPT Exporter][QA] 加载对话失败:', err);
+                state.loading = false;
+                state.turns = [];
+                state.filtered = [];
+                const statusEl = dialog.querySelector('#turn-status');
+                if (statusEl) statusEl.textContent = `加载失败: ${err?.message || err}`;
+                renderList();
+            }
+        })();
     }
 
     /**
