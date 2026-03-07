@@ -1,5 +1,7 @@
 # ChatGPT Exporter
 
+Forked from [huhusmang/ChatGPT-Exporter](https://github.com/huhusmang/ChatGPT-Exporter).
+
 一个用于批量导出 ChatGPT 对话记录的工具，支持个人空间、团队空间与项目空间的对话导出，可导出为 JSON 或 Markdown 格式。
 
 ## 功能特性
