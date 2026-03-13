@@ -571,12 +571,28 @@
         return `chatgpt_personal_qa_selected_${convShortId}_${date}.zip`;
     }
 
+    function buildExportZipFilename(mode, workspaceId, selectionType, date) {
+        if (selectionType === 'selected') {
+            return mode === 'team'
+                ? `chatgpt_team_selected_${workspaceId}_${date}.zip`
+                : mode === 'project'
+                    ? `chatgpt_project_selected_${date}.zip`
+                    : `chatgpt_personal_selected_${date}.zip`;
+        }
+        return mode === 'team'
+            ? `chatgpt_team_backup_${workspaceId}_${date}.zip`
+            : mode === 'project'
+                ? `chatgpt_project_backup_${date}.zip`
+                : `chatgpt_personal_backup_${date}.zip`;
+    }
+
     async function exportConversationSelectedTurns(options = {}) {
         const {
             mode = 'personal',
             workspaceId = null,
             conversationEntry = null,
-            selectedTurnIndexes = []
+            selectedTurnIndexes = [],
+            zipFilename = null
         } = options;
 
         if (!conversationEntry?.id) {
@@ -590,6 +606,19 @@
 
         if (selectedIdx.length === 0) {
             alert('未选择任何 Q&A。');
+            return;
+        }
+
+        const date = new Date().toISOString().slice(0, 10);
+        const convShortId = conversationEntry.id.includes('-')
+            ? conversationEntry.id.split('-').pop()
+            : conversationEntry.id;
+        const resolvedZipName = zipFilename || await promptZipFilename({
+            defaultFilename: buildQaZipFilename(mode, workspaceId, convShortId, date),
+            title: '设置 Q&A 导出压缩包名称'
+        });
+        if (!resolvedZipName) {
+            alert('已取消导出。');
             return;
         }
 
@@ -615,8 +644,6 @@
             return;
         }
 
-        const convId = convData.conversation_id || conversationEntry.id;
-        const convShortId = convId.includes('-') ? convId.split('-').pop() : convId;
         const baseName = generateSelectedTurnsBaseFilename(convData);
 
         const exportJson = {
@@ -654,9 +681,7 @@
         zip.file(`${baseName}.md`, convertSelectedTurnsToMarkdown(selectedTurns));
 
         const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-        const date = new Date().toISOString().slice(0, 10);
-        const zipName = buildQaZipFilename(mode, workspaceId, convShortId, date);
-        downloadFile(blob, zipName);
+        downloadFile(blob, resolvedZipName);
         alert('✅ Q&A 选择导出完成！');
     }
 
@@ -933,6 +958,101 @@
         URL.revokeObjectURL(a.href);
     }
 
+    function normalizeZipFilenameInput(value) {
+        const raw = String(value || '').trim();
+        if (!raw) return '';
+        const sanitized = sanitizeFilename(raw);
+        if (!sanitized) return '';
+        return /\.zip$/i.test(sanitized) ? sanitized : `${sanitized}.zip`;
+    }
+
+    function promptZipFilename(options = {}) {
+        const {
+            defaultFilename = 'chatgpt-export.zip',
+            title = '设置压缩包名称'
+        } = options;
+
+        return new Promise(resolve => {
+            const existing = document.getElementById('export-zip-name-overlay');
+            if (existing) existing.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'export-zip-name-overlay';
+            Object.assign(overlay.style, {
+                position: 'fixed', top: '0', left: '0', width: '100%', height: '100%',
+                backgroundColor: 'rgba(0, 0, 0, 0.5)', zIndex: '99999',
+                display: 'flex', alignItems: 'center', justifyContent: 'center'
+            });
+
+            const dialog = document.createElement('div');
+            Object.assign(dialog.style, {
+                background: '#fff', padding: '24px', borderRadius: '12px',
+                boxShadow: '0 5px 15px rgba(0,0,0,.3)', width: '520px',
+                fontFamily: 'sans-serif', color: '#333', boxSizing: 'border-box'
+            });
+
+            dialog.innerHTML = `
+                <h2 style="margin-top:0; margin-bottom: 12px; font-size: 18px;">${escapeHtml(title)}</h2>
+                <div style="margin-bottom: 16px; color: #666; font-size: 13px; line-height: 1.6;">
+                    即将下载 ZIP 文件。你可以自定义压缩包名称；若留空，则继续使用原来的默认命名逻辑。
+                </div>
+                <label for="zip-name-input" style="display: block; margin-bottom: 8px; font-weight: bold;">压缩包名称（可选）</label>
+                <input id="zip-name-input" type="text" placeholder="例如：chatgpt-backup-2026-xx-xx"
+                    style="width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; box-sizing: border-box;">
+                <div style="margin-top: 12px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #666; line-height: 1.6;">
+                    默认文件名：<code style="font-family: monospace; color: #111;">${escapeHtml(defaultFilename)}</code>
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+                    <button id="zip-name-cancel-btn" style="padding: 10px 16px; border: 1px solid #ccc; border-radius: 8px; background: #fff; cursor: pointer;">取消</button>
+                    <button id="zip-name-confirm-btn" style="padding: 10px 16px; border: none; border-radius: 8px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;">确认导出</button>
+                </div>
+            `;
+
+            const closeDialog = (result) => {
+                try {
+                    if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                } catch (_) {}
+                resolve(result);
+            };
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            const input = dialog.querySelector('#zip-name-input');
+            const cancelBtn = dialog.querySelector('#zip-name-cancel-btn');
+            const confirmBtn = dialog.querySelector('#zip-name-confirm-btn');
+
+            const handleConfirm = () => {
+                const rawValue = input.value.trim();
+                if (!rawValue) {
+                    closeDialog(defaultFilename);
+                    return;
+                }
+                const normalized = normalizeZipFilenameInput(rawValue);
+                if (!normalized) {
+                    alert('请输入有效的压缩包名称。');
+                    input.focus();
+                    return;
+                }
+                closeDialog(normalized);
+            };
+
+            cancelBtn.onclick = () => closeDialog(null);
+            confirmBtn.onclick = handleConfirm;
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleConfirm();
+                }
+            };
+            overlay.onclick = (e) => {
+                if (e.target === overlay) closeDialog(null);
+            };
+
+            setTimeout(() => input.focus(), 0);
+        });
+    }
+
     // --- 导出流程核心逻辑 ---
     function getExportButton() {
         let btn = document.getElementById('gpt-rescue-btn');
@@ -947,7 +1067,13 @@
     }
 
     async function exportConversations(options = {}) {
-        const { mode = 'personal', workspaceId = null, conversationEntries = null, exportType = null } = options;
+        const {
+            mode = 'personal',
+            workspaceId = null,
+            conversationEntries = null,
+            exportType = null,
+            zipFilename = null
+        } = options;
         const btn = getExportButton();
         btn.disabled = true;
 
@@ -1005,20 +1131,7 @@
             const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
             const date = new Date().toISOString().slice(0, 10);
             const selectionType = exportType || ((Array.isArray(conversationEntries) && conversationEntries.length > 0) ? 'selected' : 'full');
-            let filename = '';
-            if (selectionType === 'selected') {
-                filename = mode === 'team'
-                    ? `chatgpt_team_selected_${workspaceId}_${date}.zip`
-                    : mode === 'project'
-                        ? `chatgpt_project_selected_${date}.zip`
-                        : `chatgpt_personal_selected_${date}.zip`;
-            } else {
-                filename = mode === 'team'
-                    ? `chatgpt_team_backup_${workspaceId}_${date}.zip`
-                    : mode === 'project'
-                        ? `chatgpt_project_backup_${date}.zip`
-                        : `chatgpt_personal_backup_${date}.zip`;
-            }
+            const filename = zipFilename || buildExportZipFilename(mode, workspaceId, selectionType, date);
             downloadFile(blob, filename);
             alert(`✅ 导出完成！`);
             btn.textContent = '✅ 完成';
@@ -1035,26 +1148,71 @@
         }
     }
 
-    async function startExportProcess(mode, workspaceId) {
-        await exportConversations({ mode, workspaceId });
+    async function startExportProcess(mode, workspaceId, options = {}) {
+        const { promptForZipName = true } = options;
+        const date = new Date().toISOString().slice(0, 10);
+        const defaultFilename = buildExportZipFilename(mode, workspaceId, 'full', date);
+        const zipFilename = promptForZipName
+            ? await promptZipFilename({
+                defaultFilename,
+                title: '设置导出压缩包名称'
+            })
+            : defaultFilename;
+        if (!zipFilename) {
+            alert('已取消导出。');
+            return;
+        }
+        await exportConversations({ mode, workspaceId, zipFilename });
     }
 
-    async function startProjectSpaceExportProcess(workspaceId = null) {
+    async function startProjectSpaceExportProcess(workspaceId = null, options = {}) {
+        const { promptForZipName = true } = options;
         try {
+            const date = new Date().toISOString().slice(0, 10);
+            const defaultFilename = buildExportZipFilename('project', workspaceId, 'full', date);
+            const zipFilename = promptForZipName
+                ? await promptZipFilename({
+                    defaultFilename,
+                    title: '设置导出压缩包名称'
+                })
+                : defaultFilename;
+            if (!zipFilename) {
+                alert('已取消导出。');
+                return;
+            }
             const projectEntries = await listProjectSpaceConversations(workspaceId);
             if (projectEntries.length === 0) {
                 alert('未找到项目空间对话。');
                 return;
             }
-            await exportConversations({ mode: 'project', workspaceId, conversationEntries: projectEntries, exportType: 'full' });
+            await exportConversations({
+                mode: 'project',
+                workspaceId,
+                conversationEntries: projectEntries,
+                exportType: 'full',
+                zipFilename
+            });
         } catch (err) {
             console.error('导出项目空间失败:', err);
             alert(`导出项目空间失败: ${err.message}`);
         }
     }
 
-    async function startSelectiveExportProcess(mode, workspaceId, conversationEntries) {
-        await exportConversations({ mode, workspaceId, conversationEntries });
+    async function startSelectiveExportProcess(mode, workspaceId, conversationEntries, options = {}) {
+        const { promptForZipName = true } = options;
+        const date = new Date().toISOString().slice(0, 10);
+        const defaultFilename = buildExportZipFilename(mode, workspaceId, 'selected', date);
+        const zipFilename = promptForZipName
+            ? await promptZipFilename({
+                defaultFilename,
+                title: '设置导出压缩包名称'
+            })
+            : defaultFilename;
+        if (!zipFilename) {
+            alert('已取消导出。');
+            return;
+        }
+        await exportConversations({ mode, workspaceId, conversationEntries, zipFilename });
     }
 
     function startScheduledExport(options = {}) {
@@ -1062,9 +1220,9 @@
         const proceed = async () => {
             try {
                 if (mode === 'project') {
-                    await startProjectSpaceExportProcess(workspaceId);
+                    await startProjectSpaceExportProcess(workspaceId, { promptForZipName: !autoConfirm });
                 } else {
-                    await startExportProcess(mode, workspaceId);
+                    await startExportProcess(mode, workspaceId, { promptForZipName: !autoConfirm });
                 }
             } catch (err) {
                 console.error('[ChatGPT Exporter] 自动导出失败:', err);
