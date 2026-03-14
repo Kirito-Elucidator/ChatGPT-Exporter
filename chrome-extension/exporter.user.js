@@ -101,6 +101,12 @@
         return Number.isNaN(epochMs) ? null : Math.floor(epochMs / 1000);
     };
 
+    function getModeLabel(mode) {
+        if (mode === 'team') return '团队空间（项目外 + 项目内）';
+        if (mode === 'project') return '项目对话（仅项目内）';
+        return '个人空间（仅项目外）';
+    }
+
     /**
      * [新增] 从Cookie中获取 oai-device-id
      * @returns {string|null} - 返回设备ID或null
@@ -321,6 +327,127 @@
         URL.revokeObjectURL(a.href);
     }
 
+    function buildQaZipFilename(mode, workspaceId, convShortId, date) {
+        const wsPart = workspaceId || 'unknown';
+        if (mode === 'team') {
+            return `chatgpt_team_qa_selected_${wsPart}_${convShortId}_${date}.zip`;
+        }
+        if (mode === 'project') {
+            return `chatgpt_project_qa_selected_${convShortId}_${date}.zip`;
+        }
+        return `chatgpt_personal_qa_selected_${convShortId}_${date}.zip`;
+    }
+
+    function buildExportZipFilename(mode, workspaceId, selectionType, date) {
+        if (selectionType === 'selected') {
+            return mode === 'team'
+                ? `chatgpt_team_selected_${workspaceId}_${date}.zip`
+                : mode === 'project'
+                    ? `chatgpt_project_selected_${date}.zip`
+                    : `chatgpt_personal_selected_${date}.zip`;
+        }
+        return mode === 'team'
+            ? `chatgpt_team_backup_${workspaceId}_${date}.zip`
+            : mode === 'project'
+                ? `chatgpt_project_backup_${date}.zip`
+                : `chatgpt_personal_backup_${date}.zip`;
+    }
+
+    function normalizeZipFilenameInput(value) {
+        const raw = String(value || '').trim();
+        if (!raw) return '';
+        const sanitized = sanitizeFilename(raw);
+        if (!sanitized) return '';
+        return /\.zip$/i.test(sanitized) ? sanitized : `${sanitized}.zip`;
+    }
+
+    function promptZipFilename(options = {}) {
+        const {
+            defaultFilename = 'chatgpt-export.zip',
+            title = '设置压缩包名称'
+        } = options;
+
+        return new Promise(resolve => {
+            const existing = document.getElementById('export-zip-name-overlay');
+            if (existing) existing.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'export-zip-name-overlay';
+            Object.assign(overlay.style, {
+                position: 'fixed', top: '0', left: '0', width: '100%', height: '100%',
+                backgroundColor: 'rgba(0, 0, 0, 0.5)', zIndex: '99999',
+                display: 'flex', alignItems: 'center', justifyContent: 'center'
+            });
+
+            const dialog = document.createElement('div');
+            Object.assign(dialog.style, {
+                background: '#fff', padding: '24px', borderRadius: '12px',
+                boxShadow: '0 5px 15px rgba(0,0,0,.3)', width: '520px',
+                fontFamily: 'sans-serif', color: '#333', boxSizing: 'border-box'
+            });
+
+            dialog.innerHTML = `
+                <h2 style="margin-top:0; margin-bottom: 12px; font-size: 18px;">${escapeHtml(title)}</h2>
+                <div style="margin-bottom: 16px; color: #666; font-size: 13px; line-height: 1.6;">
+                    即将下载 ZIP 文件。你可以自定义压缩包名称；若留空，则继续使用原来的默认命名逻辑。
+                </div>
+                <label for="zip-name-input" style="display: block; margin-bottom: 8px; font-weight: bold;">压缩包名称（可选）</label>
+                <input id="zip-name-input" type="text" placeholder="例如：chatgpt-backup-2026-xx-xx"
+                    style="width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; box-sizing: border-box;">
+                <div style="margin-top: 12px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #666; line-height: 1.6;">
+                    默认文件名：<code style="font-family: monospace; color: #111;">${escapeHtml(defaultFilename)}</code>
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+                    <button id="zip-name-cancel-btn" style="padding: 10px 16px; border: 1px solid #ccc; border-radius: 8px; background: #fff; cursor: pointer;">取消</button>
+                    <button id="zip-name-confirm-btn" style="padding: 10px 16px; border: none; border-radius: 8px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;">确认导出</button>
+                </div>
+            `;
+
+            const closeDialog = (result) => {
+                try {
+                    if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                } catch (_) {}
+                resolve(result);
+            };
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            const input = dialog.querySelector('#zip-name-input');
+            const cancelBtn = dialog.querySelector('#zip-name-cancel-btn');
+            const confirmBtn = dialog.querySelector('#zip-name-confirm-btn');
+
+            const handleConfirm = () => {
+                const rawValue = input.value.trim();
+                if (!rawValue) {
+                    closeDialog(defaultFilename);
+                    return;
+                }
+                const normalized = normalizeZipFilenameInput(rawValue);
+                if (!normalized) {
+                    alert('请输入有效的压缩包名称。');
+                    input.focus();
+                    return;
+                }
+                closeDialog(normalized);
+            };
+
+            cancelBtn.onclick = () => closeDialog(null);
+            confirmBtn.onclick = handleConfirm;
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleConfirm();
+                }
+            };
+            overlay.onclick = (e) => {
+                if (e.target === overlay) closeDialog(null);
+            };
+
+            setTimeout(() => input.focus(), 0);
+        });
+    }
+
     // --- 导出流程核心逻辑 ---
     function getExportButton() {
         let btn = document.getElementById('gpt-rescue-btn');
@@ -341,7 +468,13 @@
     }
 
     async function exportConversations(options = {}) {
-        const { mode = 'personal', workspaceId = null, conversationEntries = null, exportType = null } = options;
+        const {
+            mode = 'personal',
+            workspaceId = null,
+            conversationEntries = null,
+            exportType = null,
+            zipFilename = null
+        } = options;
         const btn = getExportButton();
         btn.disabled = true;
 
@@ -399,20 +532,7 @@
             const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
             const date = new Date().toISOString().slice(0, 10);
             const selectionType = exportType || ((Array.isArray(conversationEntries) && conversationEntries.length > 0) ? 'selected' : 'full');
-            let filename = '';
-            if (selectionType === 'selected') {
-                filename = mode === 'team'
-                    ? `chatgpt_team_selected_${workspaceId}_${date}.zip`
-                    : mode === 'project'
-                        ? `chatgpt_project_selected_${date}.zip`
-                        : `chatgpt_personal_selected_${date}.zip`;
-            } else {
-                filename = mode === 'team'
-                    ? `chatgpt_team_backup_${workspaceId}_${date}.zip`
-                    : mode === 'project'
-                        ? `chatgpt_project_backup_${date}.zip`
-                        : `chatgpt_personal_backup_${date}.zip`;
-            }
+            const filename = zipFilename || buildExportZipFilename(mode, workspaceId, selectionType, date);
             downloadFile(blob, filename);
             alert(`✅ 导出完成！`);
             btn.textContent = '✅ 完成';
@@ -429,26 +549,71 @@
         }
     }
 
-    async function startExportProcess(mode, workspaceId) {
-        await exportConversations({ mode, workspaceId });
+    async function startExportProcess(mode, workspaceId, options = {}) {
+        const { promptForZipName = true } = options;
+        const date = new Date().toISOString().slice(0, 10);
+        const defaultFilename = buildExportZipFilename(mode, workspaceId, 'full', date);
+        const zipFilename = promptForZipName
+            ? await promptZipFilename({
+                defaultFilename,
+                title: '设置导出压缩包名称'
+            })
+            : defaultFilename;
+        if (!zipFilename) {
+            alert('已取消导出。');
+            return;
+        }
+        await exportConversations({ mode, workspaceId, zipFilename });
     }
 
-    async function startProjectSpaceExportProcess(workspaceId = null) {
+    async function startProjectSpaceExportProcess(workspaceId = null, options = {}) {
+        const { promptForZipName = true } = options;
         try {
-            const projectEntries = await listProjectSpaceConversations(workspaceId);
-            if (projectEntries.length === 0) {
-                alert('未找到项目空间对话。');
+            const date = new Date().toISOString().slice(0, 10);
+            const defaultFilename = buildExportZipFilename('project', workspaceId, 'full', date);
+            const zipFilename = promptForZipName
+                ? await promptZipFilename({
+                    defaultFilename,
+                    title: '设置导出压缩包名称'
+                })
+                : defaultFilename;
+            if (!zipFilename) {
+                alert('已取消导出。');
                 return;
             }
-            await exportConversations({ mode: 'project', workspaceId, conversationEntries: projectEntries, exportType: 'full' });
+            const projectEntries = await listProjectSpaceConversations(workspaceId);
+            if (projectEntries.length === 0) {
+                alert('未找到项目对话。');
+                return;
+            }
+            await exportConversations({
+                mode: 'project',
+                workspaceId,
+                conversationEntries: projectEntries,
+                exportType: 'full',
+                zipFilename
+            });
         } catch (err) {
-            console.error('导出项目空间失败:', err);
-            alert(`导出项目空间失败: ${err.message}`);
+            console.error('导出项目对话失败:', err);
+            alert(`导出项目对话失败: ${err.message}`);
         }
     }
 
-    async function startSelectiveExportProcess(mode, workspaceId, conversationEntries) {
-        await exportConversations({ mode, workspaceId, conversationEntries });
+    async function startSelectiveExportProcess(mode, workspaceId, conversationEntries, options = {}) {
+        const { promptForZipName = true } = options;
+        const date = new Date().toISOString().slice(0, 10);
+        const defaultFilename = buildExportZipFilename(mode, workspaceId, 'selected', date);
+        const zipFilename = promptForZipName
+            ? await promptZipFilename({
+                defaultFilename,
+                title: '设置导出压缩包名称'
+            })
+            : defaultFilename;
+        if (!zipFilename) {
+            alert('已取消导出。');
+            return;
+        }
+        await exportConversations({ mode, workspaceId, conversationEntries, zipFilename });
     }
 
     function startScheduledExport(options = {}) {
@@ -456,9 +621,9 @@
         const proceed = async () => {
             try {
                 if (mode === 'project') {
-                    await startProjectSpaceExportProcess(workspaceId);
+                    await startProjectSpaceExportProcess(workspaceId, { promptForZipName: !autoConfirm });
                 } else {
-                    await startExportProcess(mode, workspaceId);
+                    await startExportProcess(mode, workspaceId, { promptForZipName: !autoConfirm });
                 }
             } catch (err) {
                 console.error('[ChatGPT Exporter] 自动导出失败:', err);
@@ -470,7 +635,7 @@
             return;
         }
 
-        const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
+        const modeLabel = getModeLabel(mode);
         if (confirm(`Chrome 扩展请求导出 ${modeLabel} 对话（来源: ${source}）。是否开始？`)) {
             proceed();
         }
@@ -536,7 +701,7 @@
 
         const r = await fetch(url, { headers });
         if (!r.ok) {
-            throw new Error(`获取项目空间列表失败 (${r.status})`);
+            throw new Error(`获取项目列表失败 (${r.status})`);
         }
         const data = await r.json();
         const projects = [];
@@ -716,7 +881,7 @@
                 const r = await fetch(`/backend-api/gizmos/${project.id}/conversations?cursor=${cursor}`, { headers });
                 if (!r.ok) {
                     if (!fetched && Array.isArray(project.conversations) && project.conversations.length > 0) {
-                        console.warn(`项目空间对话列表请求失败 (${r.status})，使用侧边栏返回的预览对话。`);
+                        console.warn(`项目对话列表请求失败 (${r.status})，使用侧边栏返回的预览对话。`);
                         project.conversations.forEach(item => upsertConversationEntry(map, item, {
                             projectId: project.id,
                             projectTitle: project.title
@@ -724,7 +889,7 @@
                         cursor = null;
                         break;
                     }
-                    throw new Error(`列举项目空间对话列表失败 (${r.status})`);
+                    throw new Error(`列举项目对话列表失败 (${r.status})`);
                 }
                 const j = await r.json();
                 j.items?.forEach(item => upsertConversationEntry(map, item, {
@@ -841,7 +1006,7 @@
         };
 
         const renderBase = () => {
-            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
+            const modeLabel = getModeLabel(mode);
             const workspaceLabel = workspaceId ? `（${workspaceId}）` : '';
             dialog.innerHTML = `
                 <h2 style="margin-top:0; margin-bottom: 12px; font-size: 18px;">选择要导出的对话</h2>
@@ -903,7 +1068,7 @@
                 scopeSelect.disabled = true;
                 scopeSelect.style.opacity = '0.7';
                 scopeSelect.style.cursor = 'not-allowed';
-                scopeSelect.title = '项目空间仅包含项目对话';
+                scopeSelect.title = '项目对话模式仅包含项目内对话';
             }
 
             searchInput.oninput = (e) => {
@@ -1327,9 +1492,28 @@
     }
 
     async function exportConversationSelectedTurns(options = {}) {
-        const { mode = 'personal', workspaceId = null, conversationEntry, selectedTurnIndexes = [] } = options;
+        const {
+            mode = 'personal',
+            workspaceId = null,
+            conversationEntry,
+            selectedTurnIndexes = [],
+            zipFilename = null
+        } = options;
         if (!conversationEntry?.id) throw new Error('缺少 conversationEntry.id');
         if (!Array.isArray(selectedTurnIndexes) || selectedTurnIndexes.length === 0) return;
+
+        const date = new Date().toISOString().slice(0, 10);
+        const convShortId = conversationEntry.id.includes('-')
+            ? conversationEntry.id.split('-').pop()
+            : conversationEntry.id;
+        const resolvedZipName = zipFilename || await promptZipFilename({
+            defaultFilename: buildQaZipFilename(mode, workspaceId, convShortId, date),
+            title: '设置 Q&A 导出压缩包名称'
+        });
+        if (!resolvedZipName) {
+            alert('已取消导出。');
+            return;
+        }
 
         if (!await ensureAccessToken()) {
             throw new Error('无法获取 Access Token');
@@ -1384,10 +1568,7 @@
         target.file(`${baseName}.md`, md);
 
         const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-        const date = new Date().toISOString().slice(0, 10);
-        const wsPart = mode === 'team' ? `_${workspaceId || 'unknown'}` : '';
-        const filename = `chatgpt_${mode}${wsPart}_qa_${shortId}_${date}.zip`;
-        downloadFile(blob, filename);
+        downloadFile(blob, resolvedZipName);
 
         alert('✅ Q&A 选择导出完成！');
     }
@@ -1430,7 +1611,7 @@
         };
 
         const renderBase = () => {
-            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
+            const modeLabel = getModeLabel(mode);
             const workspaceLabel = workspaceId ? `（${escapeHtml(workspaceId)}）` : '';
             const title = conversationEntry?.title || 'Untitled Conversation';
 
@@ -1673,7 +1854,7 @@
             switch (step) {
                 case 'team': {
                     const detectedIds = detectAllWorkspaceIds();
-                    html = `<h2 style="margin-top:0; margin-bottom: 20px; font-size: 18px;">导出团队空间</h2>`;
+                    html = `<h2 style="margin-top:0; margin-bottom: 20px; font-size: 18px;">导出团队空间（项目外 + 项目内）</h2>`;
 
                     if (detectedIds.length > 1) {
                         html += `<div style="background: #eef2ff; border: 1px solid #818cf8; border-radius: 8px; padding: 12px; margin-bottom: 20px;">
@@ -1724,24 +1905,24 @@
                     html = `<h2 style="margin-top:0; margin-bottom: 20px; font-size: 18px;">选择要导出的空间</h2>
                                 <div style="display: flex; flex-direction: column; gap: 16px;">
                                     <div style="padding: 16px; border: 1px solid #ccc; border-radius: 8px; background: #f9fafb;">
-                                        <strong style="font-size: 16px;">个人空间</strong>
-                                        <p style="margin: 4px 0 12px 0; color: #666;">导出您个人账户下的对话。</p>
+                                        <strong style="font-size: 16px;">个人空间（仅项目外）</strong>
+                                        <p style="margin: 4px 0 12px 0; color: #666;">导出当前个人 workspace 下未进入项目的对话。</p>
                                         <div style="display: flex; gap: 8px;">
                                             <button id="select-personal-btn" style="padding: 8px 12px; border: none; border-radius: 6px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;">导出全部</button>
                                             <button id="select-personal-picker-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">选择对话导出</button>
                                         </div>
                                     </div>
                                     <div style="padding: 16px; border: 1px solid #ccc; border-radius: 8px; background: #f9fafb;">
-                                        <strong style="font-size: 16px;">项目空间</strong>
-                                        <p style="margin: 4px 0 12px 0; color: #666;">导出项目空间下的对话，将按项目自动分组。</p>
+                                        <strong style="font-size: 16px;">项目对话（仅项目内）</strong>
+                                        <p style="margin: 4px 0 12px 0; color: #666;">导出当前 workspace 下的项目对话，将按项目自动分组。</p>
                                         <div style="display: flex; gap: 8px;">
                                             <button id="select-project-btn" style="padding: 8px 12px; border: none; border-radius: 6px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;">导出全部</button>
                                             <button id="select-project-picker-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">选择对话导出</button>
                                         </div>
                                     </div>
                                     <div style="padding: 16px; border: 1px solid #ccc; border-radius: 8px; background: #f9fafb;">
-                                        <strong style="font-size: 16px;">团队空间</strong>
-                                        <p style="margin: 4px 0 12px 0; color: #666;">导出团队空间下的对话，将自动检测ID。</p>
+                                        <strong style="font-size: 16px;">团队空间（项目外 + 项目内）</strong>
+                                        <p style="margin: 4px 0 12px 0; color: #666;">导出团队 workspace 下的全部对话，将自动检测 ID。</p>
                                         <div style="display: flex; gap: 8px;">
                                             <button id="select-team-btn" style="padding: 8px 12px; border: none; border-radius: 6px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;">导出全部</button>
                                             <button id="select-team-picker-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">选择对话导出</button>
