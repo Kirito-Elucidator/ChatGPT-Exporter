@@ -1,26 +1,27 @@
 // ==UserScript==
-// @name         ChatGPT Universal Exporter (Markdown Support)
-// @version      1.3.1
+// @name         ChatGPT Universal Exporter (JSON & Markdown Support)
+// @version      1.4.0
 // @description  User-centric ZIP exporter for personal/team/project spaces. Supports JSON & Markdown formats. Based on ChatGPT Universal Exporter.
-// @author       huhu
+// @author       Kirito-Elucidator
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @grant        none
 // @license      MIT
-// @source       https://greasyfork.org/scripts/538495-chatgpt-universal-exporter
-// @namespace    https://github.com/huhusmang/ChatGPT-Exporter
-// @homepageURL  https://greasyfork.org/zh-CN/scripts/556233-chatgpt-universal-exporter-markdown-support
-// @downloadURL  https://update.greasyfork.org/scripts/556233/ChatGPT%20Universal%20Exporter%20(Markdown%20Support).user.js
-// @updateURL    https://update.greasyfork.org/scripts/556233/ChatGPT%20Universal%20Exporter%20(Markdown%20Support).meta.js
+// @source       https://github.com/Kirito-Elucidator/ChatGPT-Exporter
+// @namespace    https://github.com/Kirito-Elucidator/ChatGPT-Exporter
+// @homepageURL  https://greasyfork.org/zh-CN/scripts/569603-chatgpt-universal-exporter-json-markdown-support
+// @downloadURL  https://update.greasyfork.org/scripts/569603/ChatGPT%20Universal%20Exporter%20(JSON%20%26%20Markdown%20Support).user.js
+// @updateURL    https://update.greasyfork.org/scripts/569603/ChatGPT%20Universal%20Exporter%20(JSON%20%26%20Markdown%20Support).meta.js
 // ==/UserScript==
 
 /* ============================================================
-    v1.3.0 变更 (项目空间导出)
+    v1.4.0 变更
     ------------------------------------------------------------
-    • 新增项目空间导出入口，按项目自动分组
-    • 项目空间对话列表请求补齐 Workspace ID
-    • 项目空间列表优先全量拉取，失败则回退侧边栏预览
+    • 支持导出全部、选择对话导出、Q&A 轮次导出
+    • 支持个人空间、团队空间、项目对话三种导出范围
+    • 支持导出前自定义 ZIP 压缩包名称
+    • 支持 JSON 与 Markdown 导出，并保留脚注信息
     ========================================================== */
 
 (function () {
