@@ -642,30 +642,136 @@
     }
 
     // --- API 调用函数 ---
-    async function getProjects(workspaceId) {
-        if (!workspaceId) return [];
+    function extractProjectPreviewConversations(item, rawGizmo) {
+        const previewSources = [
+            item?.conversations?.items,
+            item?.conversations,
+            rawGizmo?.conversations?.items,
+            rawGizmo?.conversations
+        ];
+        for (const source of previewSources) {
+            if (Array.isArray(source) && source.length > 0) {
+                return source;
+            }
+        }
+        return [];
+    }
+
+    function mergeProjectRecords(projectMap, record) {
+        if (!record?.id) return;
+        const existing = projectMap.get(record.id);
+        if (!existing) {
+            projectMap.set(record.id, {
+                id: record.id,
+                title: record.title || 'Untitled Project',
+                conversations: Array.isArray(record.conversations) ? [...record.conversations] : []
+            });
+            return;
+        }
+
+        if ((!existing.title || existing.title === 'Untitled Project') && record.title) {
+            existing.title = record.title;
+        }
+
+        if (!Array.isArray(record.conversations) || record.conversations.length === 0) {
+            return;
+        }
+
+        const seenConversationIds = new Set(existing.conversations.map(item => item?.id).filter(Boolean));
+        record.conversations.forEach(item => {
+            if (!item) return;
+            if (item.id && seenConversationIds.has(item.id)) return;
+            existing.conversations.push(item);
+            if (item.id) seenConversationIds.add(item.id);
+        });
+    }
+
+    function collectProjectsFromSidebarPayload(data, projectMap) {
+        const pushProject = (entry) => {
+            const rawGizmo = entry?.gizmo?.gizmo || entry?.gizmo || entry;
+            const display = rawGizmo?.display || entry?.gizmo?.display || entry?.display;
+            const id = rawGizmo?.id || entry?.gizmo?.id || entry?.id;
+            if (!id) return;
+            mergeProjectRecords(projectMap, {
+                id,
+                title: display?.name || rawGizmo?.name || entry?.name || 'Untitled Project',
+                conversations: extractProjectPreviewConversations(entry, rawGizmo)
+            });
+        };
+
+        if (Array.isArray(data?.gizmos)) {
+            data.gizmos.forEach(pushProject);
+        }
+        if (Array.isArray(data?.items)) {
+            data.items.forEach(pushProject);
+        }
+    }
+
+    async function getSidebarProjects(workspaceId, options = {}) {
         const deviceId = getOaiDeviceId();
         if (!deviceId) {
             throw new Error('无法获取 oai-device-id，请确保已登录并刷新页面。');
         }
+
         const headers = {
             'Authorization': `Bearer ${accessToken}`,
-            'ChatGPT-Account-Id': workspaceId,
             'oai-device-id': deviceId
         };
-        const r = await fetch(`/backend-api/gizmos/snorlax/sidebar`, { headers });
-        if (!r.ok) {
-            console.warn(`获取项目(Gizmo)列表失败 (${r.status})`);
+        const resolvedWorkspaceId = resolveWorkspaceId(workspaceId);
+        if (resolvedWorkspaceId) {
+            headers['ChatGPT-Account-Id'] = resolvedWorkspaceId;
+        }
+
+        const projectMap = new Map();
+        const seenCursors = new Set();
+        let cursor = null;
+
+        do {
+            const query = new URLSearchParams();
+            if (options.conversationsPerGizmo !== undefined) {
+                query.set('conversations_per_gizmo', String(options.conversationsPerGizmo));
+            }
+            if (options.ownedOnly !== undefined) {
+                query.set('owned_only', options.ownedOnly ? 'true' : 'false');
+            }
+            if (cursor) {
+                query.set('cursor', cursor);
+            }
+
+            const url = query.toString()
+                ? `/backend-api/gizmos/snorlax/sidebar?${query.toString()}`
+                : '/backend-api/gizmos/snorlax/sidebar';
+
+            const r = await fetch(url, { headers });
+            if (!r.ok) {
+                throw new Error(`获取项目列表失败 (${r.status})`);
+            }
+
+            const data = await r.json();
+            collectProjectsFromSidebarPayload(data, projectMap);
+
+            // “...更多” 对应的项目通常在后续 cursor 页里，需要持续翻页合并。
+            const nextCursor = data?.cursor || data?.next_cursor || data?.nextCursor || null;
+            if (!nextCursor || seenCursors.has(nextCursor)) {
+                break;
+            }
+            seenCursors.add(nextCursor);
+            cursor = nextCursor;
+            await sleep(jitter());
+        } while (cursor);
+
+        return Array.from(projectMap.values());
+    }
+
+    async function getProjects(workspaceId) {
+        if (!workspaceId) return [];
+        try {
+            const projects = await getSidebarProjects(workspaceId);
+            return projects.map(project => ({ id: project.id, title: project.title }));
+        } catch (err) {
+            console.warn(err?.message || '获取项目(Gizmo)列表失败');
             return [];
         }
-        const data = await r.json();
-        const projects = [];
-        data.items?.forEach(item => {
-            if (item?.gizmo?.id && item?.gizmo?.display?.name) {
-                projects.push({ id: item.gizmo.id, title: item.gizmo.display.name });
-            }
-        });
-        return projects;
     }
 
     function resolveWorkspaceId(workspaceId) {
@@ -677,47 +783,11 @@
     }
 
     async function getProjectSpaces(workspaceId, options = {}) {
-        const deviceId = getOaiDeviceId();
-        if (!deviceId) {
-            throw new Error('无法获取 oai-device-id，请确保已登录并刷新页面。');
+        try {
+            return await getSidebarProjects(workspaceId, options);
+        } catch (err) {
+            throw new Error(err?.message?.replace('获取项目列表', '获取项目空间列表') || '获取项目空间列表失败');
         }
-        const headers = {
-            'Authorization': `Bearer ${accessToken}`,
-            'oai-device-id': deviceId
-        };
-        const resolvedWorkspaceId = resolveWorkspaceId(workspaceId);
-        if (resolvedWorkspaceId) { headers['ChatGPT-Account-Id'] = resolvedWorkspaceId; }
-
-        const query = new URLSearchParams();
-        if (options.conversationsPerGizmo !== undefined) {
-            query.set('conversations_per_gizmo', String(options.conversationsPerGizmo));
-        }
-        if (options.ownedOnly !== undefined) {
-            query.set('owned_only', options.ownedOnly ? 'true' : 'false');
-        }
-        const url = query.toString()
-            ? `/backend-api/gizmos/snorlax/sidebar?${query.toString()}`
-            : '/backend-api/gizmos/snorlax/sidebar';
-
-        const r = await fetch(url, { headers });
-        if (!r.ok) {
-            throw new Error(`获取项目列表失败 (${r.status})`);
-        }
-        const data = await r.json();
-        const projects = [];
-        data.items?.forEach(item => {
-            const rawGizmo = item?.gizmo?.gizmo || item?.gizmo || item;
-            const display = rawGizmo?.display || item?.gizmo?.display || item?.display;
-            const id = rawGizmo?.id || item?.gizmo?.id || item?.id;
-            const title = display?.name || rawGizmo?.name || 'Untitled Project';
-            if (!id) return;
-            projects.push({
-                id,
-                title,
-                conversations: item?.conversations?.items || []
-            });
-        });
-        return projects;
     }
 
     async function collectIds(btn, workspaceId, gizmoId) {
@@ -796,6 +866,24 @@
         if (existing.title === 'Untitled Conversation' && entry.title) {
             existing.title = entry.title;
         }
+    }
+
+    function sortProjectConversationEntries(entries) {
+        const groups = new Map();
+        entries.forEach(entry => {
+            const key = entry?.projectId || '__ungrouped__';
+            const existing = groups.get(key) || {
+                latestUpdate: 0,
+                items: []
+            };
+            existing.items.push(entry);
+            existing.latestUpdate = Math.max(existing.latestUpdate || 0, entry?.update_time || 0);
+            groups.set(key, existing);
+        });
+
+        return Array.from(groups.values())
+            .sort((a, b) => (b.latestUpdate || 0) - (a.latestUpdate || 0))
+            .flatMap(group => group.items.sort((a, b) => (b.update_time || 0) - (a.update_time || 0)));
     }
 
     async function listConversations(workspaceId) {
@@ -902,8 +990,7 @@
             } while (cursor);
         }
 
-        return Array.from(map.values())
-            .sort((a, b) => (b.update_time || 0) - (a.update_time || 0));
+        return sortProjectConversationEntries(Array.from(map.values()));
     }
 
     async function getConversation(id, workspaceId) {
