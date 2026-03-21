@@ -786,7 +786,7 @@
         try {
             return await getSidebarProjects(workspaceId, options);
         } catch (err) {
-            throw new Error(err?.message?.replace('获取项目列表', '获取项目空间列表') || '获取项目空间列表失败');
+            throw new Error(err?.message?.replace('获取项目列表', '获取项目对话所需项目列表') || '获取项目对话所需项目列表失败');
         }
     }
 

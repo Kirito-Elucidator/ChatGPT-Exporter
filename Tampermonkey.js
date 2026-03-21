@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         ChatGPT Universal Exporter (JSON & Markdown Support)
-// @version      1.4.0
+// @version      1.4.1
 // @description  User-centric ZIP exporter for personal/team/project spaces. Supports JSON & Markdown formats. Based on ChatGPT Universal Exporter.
 // @author       Kirito-Elucidator
 // @match        https://chatgpt.com/*
@@ -16,11 +16,12 @@
 // ==/UserScript==
 
 /* ============================================================
-    v1.4.0 变更
+    v1.4.1 变更
     ------------------------------------------------------------
     • 支持导出全部、选择对话导出、Q&A 轮次导出
     • 支持个人空间、团队空间、项目对话三种导出范围
     • 支持导出前自定义 ZIP 压缩包名称
+    • 支持导出 `...更多` 中的隐藏项目，并按项目最近更新时间分组排序
     • 支持 JSON 与 Markdown 导出，并保留脚注信息
     ========================================================== */
 
@@ -725,7 +726,7 @@
         };
 
         const renderBase = () => {
-            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
+            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目对话' : '个人空间';
             const workspaceLabel = workspaceId ? `（${workspaceId}）` : '';
             const title = conversationEntry?.title || 'Untitled Conversation';
             const safeTitle = escapeHtml(title);
@@ -1183,7 +1184,7 @@
             }
             const projectEntries = await listProjectSpaceConversations(workspaceId);
             if (projectEntries.length === 0) {
-                alert('未找到项目空间对话。');
+                alert('未找到项目对话。');
                 return;
             }
             await exportConversations({
@@ -1194,8 +1195,8 @@
                 zipFilename
             });
         } catch (err) {
-            console.error('导出项目空间失败:', err);
-            alert(`导出项目空间失败: ${err.message}`);
+            console.error('导出项目对话失败:', err);
+            alert(`导出项目对话失败: ${err.message}`);
         }
     }
 
@@ -1235,7 +1236,7 @@
             return;
         }
 
-        const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
+        const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目对话' : '个人空间';
         if (confirm(`Chrome 扩展请求导出 ${modeLabel} 对话（来源: ${source}）。是否开始？`)) {
             proceed();
         }
@@ -1386,7 +1387,7 @@
         try {
             return await getSidebarProjects(workspaceId, options);
         } catch (err) {
-            throw new Error(err?.message?.replace('获取项目列表', '获取项目空间列表') || '获取项目空间列表失败');
+            throw new Error(err?.message?.replace('获取项目列表', '获取项目对话所需项目列表') || '获取项目对话所需项目列表失败');
         }
     }
 
@@ -1569,7 +1570,7 @@
                 const r = await fetch(`/backend-api/gizmos/${project.id}/conversations?cursor=${cursor}`, { headers });
                 if (!r.ok) {
                     if (!fetched && Array.isArray(project.conversations) && project.conversations.length > 0) {
-                        console.warn(`项目空间对话列表请求失败 (${r.status})，使用侧边栏返回的预览对话。`);
+                        console.warn(`项目对话列表请求失败 (${r.status})，使用侧边栏返回的预览对话。`);
                         project.conversations.forEach(item => upsertConversationEntry(map, item, {
                             projectId: project.id,
                             projectTitle: project.title
@@ -1577,7 +1578,7 @@
                         cursor = null;
                         break;
                     }
-                    throw new Error(`列举项目空间对话列表失败 (${r.status})`);
+                    throw new Error(`列举项目对话列表失败 (${r.status})`);
                 }
                 const j = await r.json();
                 j.items?.forEach(item => upsertConversationEntry(map, item, {
@@ -1697,7 +1698,7 @@
         };
 
         const renderBase = () => {
-            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目空间' : '个人空间';
+            const modeLabel = mode === 'team' ? '团队空间' : mode === 'project' ? '项目对话' : '个人空间';
             const workspaceLabel = workspaceId ? `（${workspaceId}）` : '';
             dialog.innerHTML = `
                 <h2 style="margin-top:0; margin-bottom: 12px; font-size: 18px;">选择要导出的对话</h2>
@@ -1759,7 +1760,7 @@
                 scopeSelect.disabled = true;
                 scopeSelect.style.opacity = '0.7';
                 scopeSelect.style.cursor = 'not-allowed';
-                scopeSelect.title = '项目空间仅包含项目对话';
+                scopeSelect.title = '项目对话模式仅包含项目内对话';
             }
 
             searchInput.oninput = (e) => {
@@ -2096,8 +2097,8 @@
                                         </div>
                                     </div>
                                     <div style="padding: 16px; border: 1px solid #ccc; border-radius: 8px; background: #f9fafb;">
-                                        <strong style="font-size: 16px;">项目空间</strong>
-                                        <p style="margin: 4px 0 12px 0; color: #666;">导出项目空间下的对话，将按项目自动分组。</p>
+                                        <strong style="font-size: 16px;">项目对话</strong>
+                                        <p style="margin: 4px 0 12px 0; color: #666;">导出项目内对话，支持包含“...更多”中的隐藏项目，并按项目自动分组。</p>
                                         <div style="display: flex; gap: 8px;">
                                             <button id="select-project-btn" style="padding: 8px 12px; border: none; border-radius: 6px; background: #10a37f; color: #fff; cursor: pointer; font-weight: bold;">导出全部</button>
                                             <button id="select-project-picker-btn" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">选择对话导出</button>
